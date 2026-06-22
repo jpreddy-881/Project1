@@ -1,0 +1,113 @@
+# Technical Guide to the Lakehouse Platform (Intern Edition)
+
+Welcome to the team! This guide explains the technical architecture of our local Lakehouse platform in simple, clear terms. If you understand Python, you will easily understand this system.
+
+---
+
+## 1. What is our "Lakehouse"?
+
+Historically, companies had to choose between a **Data Lake** (cheap file storage like folders of JSON/CSV) and a **Data Warehouse** (fast SQL databases). 
+
+A **Lakehouse** combines both:
+* **Storage**: We store data as **Delta Lake** files in local folders. Delta files are regular Parquet files wrapped in a transaction log (`_delta_log/`). This transaction log gives us database-like features (ACID transactions, updates, deletes, and history lookup).
+* **Processing**: We use **PySpark** (Python interface for Apache Spark) to query, clean, and write these files.
+
+---
+
+## 2. The 5 Configuration Tables (The Brains)
+
+To keep the platform generic, we do not write python code for each new dataset. Instead, we write configurations into **5 Delta tables** in `data/metadata/`. The engine reads these tables to decide what to do:
+
+1. **`pipeline_config`**: Stores the pipelines (e.g. `sales_ingestion`). It contains the schedule, description, and if it is active.
+2. **`table_config`**: Maps the physical files. It tells the engine that `sales_ingestion` reads a `JSON` file from a source path, and writes a `Delta` table to a target path using the `merge` (upsert) strategy.
+3. **`column_config`**: The schema gatekeeper. It defines the allowed columns, data types (e.g. integer, string, double), and nullability.
+4. **`dq_rules`**: Data Quality rules. It holds expressions like `unit_price > 0`. If a row fails this check, it defines what to do (e.g., quarantine the row).
+5. **`pipeline_dependencies`**: Defines DAG relationships. It tells the system: *"Do not run Gold Table Ingestion until Silver Table Ingestion finishes successfully."*
+
+---
+
+## 3. How to Run the Code (Execution Command)
+
+To run the entire platform simulation locally, open your terminal at the root of the workspace directory and execute:
+```powershell
+python run_pipeline.py
+```
+
+---
+
+## 4. Step-by-Step Code Execution Flow (File-by-File Trace)
+
+When you execute the command above, here is the exact trace of which file runs first, where the logic goes next, and what happens at each step:
+
+```mermaid
+graph TD
+    A[run_pipeline.py: main] -->|1. Get Spark Session| B[spark_session.py]
+    A -->|2. Create & Seed Metadata| C[metadata_helper.py]
+    A -->|3. Trigger Ingestion| D[orchestrator.py: run_pipeline]
+    D -->|4. Get Config & Watermark| C
+    D -->|5. Log Start Status| E[audit.py: PipelineAuditor]
+    D -->|6. Extract Data| F[reader.py: read_source]
+    D -->|7. Run Validations| G[quality.py: run_quality_checks]
+    G -->|Write Invalid Rows| H[(Quarantine Delta Folder)]
+    D -->|8. Apply Write Strategy| I[writer.py: write_delta]
+    I -->|Merge/Append Clean Rows| J[(Target Medallion Delta Table)]
+    D -->|9. Log Completion Metrics| E
+```
+
+### Step 1: Start at `run_pipeline.py` (The Entry Point)
+1. **Python Path & Environment variables**: The script sets `PYSPARK_PYTHON` to point to your current Python interpreter. This prevents Windows from redirecting PySpark workers to the Microsoft Windows Store.
+2. **Initialize Spark**: It calls `get_spark_session()` in `src/utils/spark_session.py` to instantiate our Spark session loaded with Delta Lake packages.
+
+### Step 2: Seed Configurations (`metadata_helper.py`)
+1. **Initialize Tables**: `run_pipeline.py` calls `meta.initialize_metadata_tables(spark)`.
+2. **Schema Creation**: The helper checks if the 5 config tables and 2 operational log tables exist in `data/metadata/`. If not, it creates them.
+3. **Config Seeding**: The script creates DataFrames matching our metadata schemas and saves them as Delta tables, configuring our `sales_landing_to_bronze` pipeline.
+
+### Step 3: Start Ingestion (`src/orchestrator.py`)
+`run_pipeline.py` calls `run_pipeline("sales_landing_to_bronze")` inside `orchestrator.py`. This is where the core execution flow resides:
+1. **Lookup Config**: The orchestrator calls `meta.get_pipeline_config(spark, pipeline_id)`. The helper runs a Delta query joining `pipeline_config` and `table_config` to resolve where the source JSONs and target Bronze Delta tables are located.
+2. **Auditor Start**: The orchestrator instantiates `PipelineAuditor` in `src/audit.py` which records the start time and sets the pipeline log status to `RUNNING`.
+3. **Get Watermark**: It queries `pipeline_execution_log` to find the last timestamp we processed successfully. If it is the first run, the watermark is `NULL`.
+
+### Step 4: Extract Incremental Data (`src/reader.py`)
+1. The orchestrator calls `read_source()`.
+2. **File Load**: Spark reads the JSON raw files inside `data/landing/raw_sales/`.
+3. **Filter**: If a watermark exists, Spark filters out old records: `.filter(col(watermark_col) > watermark_start)`.
+
+### Step 5: Enforce Quality Rules (`src/quality.py`)
+1. The orchestrator calls `run_quality_checks()`.
+2. **Fetch Rules**: The engine queries `data_quality_rules` for checks assigned to our target table. It finds the rule `unit_price > 0`.
+3. **Split Data**:
+   * **Clean rows** matching the rule continue down the pipeline.
+   * **Failed rows** (e.g. `broken keyboard` with price `-10.0`) are separated using `.filter("NOT (unit_price > 0)")`.
+4. **Quarantine**: The failed rows are written to `data/quarantine/sales_landing_to_bronze/sales_price_positive` as a Delta table, and a metric entry is written to `data_quality_log`.
+
+### Step 6: Idempotent Load (`src/writer.py`)
+1. The orchestrator calls `write_delta()`.
+2. **Schema Bootstrap**: If the target table does not exist, it saves the initial schema.
+3. **Merge Upsert**: If write mode is `merge`, it runs a Delta Merge condition:
+   ```python
+   target_table.alias("target") \
+       .merge(df.alias("source"), "target.sale_id = source.sale_id") \
+       .whenMatchedUpdateAll() \
+       .whenNotMatchedInsertAll() \
+       .execute()
+   ```
+   This ensures that if we run the same dataset twice, Spark updates existing records rather than writing duplicates.
+
+### Step 7: Update Audit Log (`src/audit.py`)
+1. The orchestrator finds the maximum timestamp inside the clean dataset to use as the new watermark.
+2. It calls `auditor.success()` which updates our `pipeline_execution_log` Delta table.
+3. The pipeline log status changes from `RUNNING` to `SUCCESS`, updating the `watermark_end` for the next incremental cycle.
+
+---
+
+## 5. File & Folder Index
+Here are the files you will be working with:
+* [spark_session.py](file:///c:/Users/Dell/Downloads/project1/src/utils/spark_session.py): Sets up the Spark connection with Delta packages.
+* [metadata_helper.py](file:///c:/Users/Dell/Downloads/project1/src/utils/metadata_helper.py): Defines StructType schemas and performs metadata reads/writes.
+* [reader.py](file:///c:/Users/Dell/Downloads/project1/src/reader.py): Logic to filter input data using watermarks.
+* [quality.py](file:///c:/Users/Dell/Downloads/project1/src/quality.py): Rules checker that filters clean data and quarantines bad data.
+* [writer.py](file:///c:/Users/Dell/Downloads/project1/src/writer.py): Inserts, updates, or merges data into Delta files.
+* [orchestrator.py](file:///c:/Users/Dell/Downloads/project1/src/orchestrator.py): The main coordinator connecting all the steps.
+* [run_pipeline.py](file:///c:/Users/Dell/Downloads/project1/run_pipeline.py): The execution runner containing dummy dataset generations and seeding routines.

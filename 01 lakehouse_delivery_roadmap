@@ -1,0 +1,63 @@
+# Local Lakehouse Platform Delivery & Roadmap
+
+This document outlines the final state of the implemented local Lakehouse platform, structured as a series of clear development sprints. It uses simple English to explain how the platform works and how it was built.
+
+---
+
+## The Final State of the Platform
+
+We have built a **fully functional, local Lakehouse platform** on your machine. 
+
+Instead of using traditional database servers, the platform stores all data (including operational settings, quality rules, and execution history) in **Delta Lake files** directly on your local computer. It uses **PySpark** to process millions of records quickly and safely.
+
+The platform is **generic** (it can handle different types of data by changing settings, not code) and **idempotent** (if a run fails, running it again will not double the data or break anything).
+
+---
+
+## Work Breakdown by Sprints
+
+Here is how the project was executed, divided into logical Sprints:
+
+### Sprint 1: Setup & Core Configuration (Base Foundation)
+* **Goal**: Establish the workspace folders and create the connection to Spark.
+* **What was built**:
+  1. **Folder Structure**: Structured directories separating landing zones, metadata, bronze data, silver data, gold data, and python source code.
+  2. **Bootstrap Config**: A setting file ([bootstrap_config.json](file:///c:/Users/Dell/Downloads/project1/config/bootstrap_config.json)) telling the platform where to find metadata.
+  3. **Spark Helper**: A factory module ([spark_session.py](file:///c:/Users/Dell/Downloads/project1/src/utils/spark_session.py)) that launches Spark with local Delta configurations, resolving compatibility blocks on Windows.
+
+### Sprint 2: Metadata-Driven Control Tables (The Brain)
+* **Goal**: Enable the system to track what to run, when it ran, and how many records it processed.
+* **What was built**:
+  1. **Metadata Manager**: A module ([metadata_helper.py](file:///c:/Users/Dell/Downloads/project1/src/utils/metadata_helper.py)) that handles all configurations.
+  2. **Control Tables**: Initiated 4 Delta tables in `data/metadata/`:
+     * `pipeline_metadata`: Defines what source maps to what target.
+     * `pipeline_execution_log`: Tracks execution time, status, and watermarks (timestamps).
+     * `data_quality_rules`: Rules to check the data.
+     * `data_quality_log`: Log of rule violations.
+
+### Sprint 3: The ETL Core Engine (The Muscles)
+* **Goal**: Implement reading, writing, and quality filtering logic.
+* **What was built**:
+  1. **Reader** ([reader.py](file:///c:/Users/Dell/Downloads/project1/src/reader.py)): Reads raw data and filters it to only process new records (using watermarks).
+  2. **Writer** ([writer.py](file:///c:/Users/Dell/Downloads/project1/src/writer.py)): Writes data using appends, overwrites, or merges (upserts).
+  3. **Quality Check** ([quality.py](file:///c:/Users/Dell/Downloads/project1/src/quality.py)): Evaluates mathematical and logical expressions on rows.
+  4. **Auditor** ([audit.py](file:///c:/Users/Dell/Downloads/project1/src/audit.py)): Automatically logs run metrics when a pipeline starts, succeeds, or fails.
+
+### Sprint 4: Orchestration & End-to-End Test (Execution & Delivery)
+* **Goal**: Tie all components together into an automated runner.
+* **What was built**:
+  1. **Orchestrator** ([orchestrator.py](file:///c:/Users/Dell/Downloads/project1/src/orchestrator.py)): Connects the reader, quality framework, writer, and auditor together to run a pipeline from end to end.
+  2. **E2E Simulation Runner** ([run_pipeline.py](file:///c:/Users/Dell/Downloads/project1/run_pipeline.py)): Installs dummy landing JSON files, seeds tables, and performs:
+     - **Batch 1 Ingestion**: Ingested 3 raw records.
+     - **Batch 2 Incremental Ingestion**: Checked watermarks to ignore old data, executed a rule (`unit_price > 0`), **quarantined 1 bad record**, and **merged** the remaining clean data.
+     - **Audit Verification**: Validated execution history and quality logs directly in Delta.
+
+---
+
+## How to Run the Platform
+
+To test the entire platform, open a terminal in the project directory and run:
+```powershell
+python run_pipeline.py
+```
+This script will recreate the local folders, simulate data ingestion, run checks, and print out the audit logs on your screen.

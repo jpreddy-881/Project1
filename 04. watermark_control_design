@@ -1,0 +1,96 @@
+# Watermark Control Framework Design
+
+This document details the dedicated Delta-based **Watermark Control Framework** designed to handle incremental ingestions, late-arriving records, and backfill operations.
+
+---
+
+## 1. Watermark Control Table (`watermark_control`)
+
+### Purpose
+Tracks the current high-watermark for each pipeline/table, configures offsets to capture late-arriving data, and tracks active backfill execution states.
+
+### Schema (Columns)
+* **`watermark_id`** (STRING, Primary Key): Unique identifier for this watermark rule (UUID).
+* **`pipeline_id`** (STRING, Foreign Key): Links to `pipeline_config`.
+* **`table_id`** (STRING, Foreign Key): Links to `table_config` conformed target.
+* **`watermark_column`** (STRING): Name of the source column used for filtering (e.g. `last_updated_at`).
+* **`last_watermark_value`** (TIMESTAMP): The highest timestamp successfully processed.
+* **`lookback_minutes`** (LONG): The offset subtracted from `last_watermark_value` to catch late-arriving data.
+* **`backfill_status`** (STRING): State of backfill (`NONE`, `ACTIVE`, `COMPLETED`).
+* **`backfill_start`** (TIMESTAMP): Custom backfill lower boundary override.
+* **`backfill_end`** (TIMESTAMP): Custom backfill upper boundary override.
+* **`updated_at`** (TIMESTAMP): Timestamp of the last successful update of this watermark.
+
+---
+
+## 2. Example Records & Execution Scenarios
+
+### Scenario A: Standard Incremental Load
+Processes new records that arrived since the last run.
+
+```json
+{
+  "watermark_id": "wtm_sales_001",
+  "pipeline_id": "sales_landing_to_bronze",
+  "table_id": "sales_bronze_target",
+  "watermark_column": "last_updated_at",
+  "last_watermark_value": "2026-06-20 18:00:00",
+  "lookback_minutes": 0,
+  "backfill_status": "NONE",
+  "backfill_start": null,
+  "backfill_end": null,
+  "updated_at": "2026-06-20 18:02:15"
+}
+```
+* **Engine Behavior**:
+  * Reads where `last_updated_at > '2026-06-20 18:00:00'`.
+  * After success, updates `last_watermark_value` to the maximum timestamp of the conformed batch.
+
+---
+
+### Scenario B: Handling Late-Arriving Data
+If network lag delays transactional records, they might arrive with a timestamp that is *older* than our current high-watermark. To capture these, we configure a **Lookback Window**.
+
+```json
+{
+  "watermark_id": "wtm_sales_001",
+  "pipeline_id": "sales_landing_to_bronze",
+  "table_id": "sales_bronze_target",
+  "watermark_column": "last_updated_at",
+  "last_watermark_value": "2026-06-20 18:00:00",
+  "lookback_minutes": 60,
+  "backfill_status": "NONE",
+  "backfill_start": null,
+  "backfill_end": null,
+  "updated_at": "2026-06-20 18:02:15"
+}
+```
+* **Engine Behavior**:
+  * Calculates effective starting point: `last_watermark_value - lookback_minutes` (i.e. `2026-06-20 17:00:00`).
+  * Reads where `last_updated_at > '2026-06-20 17:00:00'`.
+  * *Idempotency Safety*: Since we read a overlapping window of 60 minutes, the Delta `MERGE` writer handles duplicates automatically (updating records if they already exist, inserting if they are new).
+
+---
+
+### Scenario C: Active Backfill Operation
+Reprocesses historical data between specific dates without corrupting the standard incremental run watermarks.
+
+```json
+{
+  "watermark_id": "wtm_sales_001",
+  "pipeline_id": "sales_landing_to_bronze",
+  "table_id": "sales_bronze_target",
+  "watermark_column": "last_updated_at",
+  "last_watermark_value": "2026-06-20 18:00:00",
+  "lookback_minutes": 0,
+  "backfill_status": "ACTIVE",
+  "backfill_start": "2026-05-01 00:00:00",
+  "backfill_end": "2026-05-31 23:59:59",
+  "updated_at": "2026-06-20 18:02:15"
+}
+```
+* **Engine Behavior**:
+  * Since `backfill_status = 'ACTIVE'`, the engine **ignores** `last_watermark_value`.
+  * Reads source records where `last_updated_at` is between `backfill_start` and `backfill_end`.
+  * Writes to target table (typically using partition overwrite or merge).
+  * **Critical Safeguard**: When the run succeeds, the engine does **not** overwrite `last_watermark_value` (since that would jump the watermark backwards or forwards and corrupt incremental runs). It only updates `backfill_status = 'COMPLETED'`.

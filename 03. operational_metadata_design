@@ -1,0 +1,116 @@
+# Operational Metadata & Audit Design
+
+This document details the operational metadata tables used to audit execution, measure step-level performance, and reconcile record counts across layers to guarantee zero data loss.
+
+---
+
+## 1. `audit_pipeline_execution`
+
+### Purpose
+Logs the overall lifecycle of a pipeline run, capturing high-level execution parameters, watermarks, and final run statuses.
+
+### Schema (Columns)
+* **`run_id`** (STRING, Primary Key): Unique run identifier (UUID).
+* **`pipeline_id`** (STRING, Foreign Key): Identifier of the pipeline.
+* **`execution_start`** (TIMESTAMP): Ingestion run start time.
+* **`execution_end`** (TIMESTAMP): Ingestion run end time.
+* **`watermark_start`** (TIMESTAMP): Lower watermark bound.
+* **`watermark_end`** (TIMESTAMP): Upper watermark bound.
+* **`records_read`** (LONG): Total records read from the source.
+* **`records_written`** (LONG): Total records successfully written to target.
+* **`status`** (STRING): Run status (`RUNNING`, `SUCCESS`, `FAILED`).
+* **`error_message`** (STRING): Error stack trace if the execution failed.
+
+### Example Record
+```json
+{
+  "run_id": "3f241bd5-0f65-4bed-90f3-b08d651ed370",
+  "pipeline_id": "sales_landing_to_bronze",
+  "execution_start": "2026-06-20 19:38:58",
+  "execution_end": "2026-06-20 19:39:32",
+  "watermark_start": "2026-06-20 10:10:00",
+  "watermark_end": "2026-06-20 11:15:00",
+  "records_read": 3,
+  "records_written": 2,
+  "status": "SUCCESS",
+  "error_message": null
+}
+```
+
+### Usage Scenarios
+* **Watermark Extraction**: When starting a run, the system queries this table for the latest `watermark_end` of the last `SUCCESS` run to set the starting boundary.
+* **SLA Monitoring**: Alerting systems scan this table for runs where `status = FAILED` or runs that have remained in `RUNNING` status beyond the expected SLA window.
+
+---
+
+## 2. `audit_pipeline_steps`
+
+### Purpose
+Profiles performance at the sub-component level, tracking the duration and processing counts of individual steps (e.g. read, quality validation, write) inside a single run.
+
+### Schema (Columns)
+* **`step_run_id`** (STRING, Primary Key): Unique identifier for this step execution (UUID).
+* **`run_id`** (STRING, Foreign Key): Links to `audit_pipeline_execution`.
+* **`step_name`** (STRING): Name of the step (`extract`, `dq_checks`, `target_load`).
+* **`start_time`** (TIMESTAMP): Step start time.
+* **`end_time`** (TIMESTAMP): Step end time.
+* **`status`** (STRING): Step result (`SUCCESS`, `FAILED`).
+* **`records_processed`** (LONG): Count of rows handled by the step.
+* **`error_details`** (STRING): Error messages specific to this sub-step.
+
+### Example Record
+```json
+{
+  "step_run_id": "sr_87612b-f81d-4071",
+  "run_id": "3f241bd5-0f65-4bed-90f3-b08d651ed370",
+  "step_name": "dq_checks",
+  "start_time": "2026-06-20 19:39:05",
+  "end_time": "2026-06-20 19:39:18",
+  "status": "SUCCESS",
+  "records_processed": 3,
+  "error_details": null
+}
+```
+
+### Usage Scenarios
+* **Bottleneck Debugging**: Engineering teams run aggregations on `end_time - start_time` grouped by `step_name` to identify which specific phase (e.g., quality checking vs. final write merge) is slowing down the pipeline as data scale grows.
+* **Granular Failure Analysis**: If a pipeline halts, developers can see exactly which step failed (e.g., read step succeeded, but write step ran out of memory).
+
+---
+
+## 3. `audit_data_reconciliation`
+
+### Purpose
+Guarantees data integrity and compliance by performing mathematical audits across layers, ensuring no records are lost.
+
+### Schema (Columns)
+* **`reconciliation_id`** (STRING, Primary Key): Unique audit reconciliation ID (UUID).
+* **`run_id`** (STRING, Foreign Key): Links to `audit_pipeline_execution`.
+* **`pipeline_id`** (STRING): Downstream pipeline ID.
+* **`source_count`** (LONG): Record count read from landing.
+* **`target_inserted_count`** (LONG): Brand new records written to target.
+* **`target_updated_count`** (LONG): Existing records updated in target.
+* **`quarantine_count`** (LONG): Records filtered out and sent to quarantine.
+* **`discrepancy_count`** (LONG): Unreconciled count (calculated as: `source_count - (inserted + updated + quarantine)`). Should always be `0`.
+* **`reconciliation_status`** (STRING): Status (`RECONCILED`, `DISCREPANCY`).
+* **`notes`** (STRING): Explanatory logs for audit tracking.
+
+### Example Record
+```json
+{
+  "reconciliation_id": "rec_0912ab-d456",
+  "run_id": "3f241bd5-0f65-4bed-90f3-b08d651ed370",
+  "pipeline_id": "sales_landing_to_bronze",
+  "source_count": 3,
+  "target_inserted_count": 1,
+  "target_updated_count": 1,
+  "quarantine_count": 1,
+  "discrepancy_count": 0,
+  "reconciliation_status": "RECONCILED",
+  "notes": "Source records (3) equal target updates (1) + inserts (1) + quarantine (1). Balanced."
+}
+```
+
+### Usage Scenarios
+* **Financial & Compliance Audits**: Ensures that every transaction that entered the system is fully accounted for (either clean in production or isolated in quarantine) to meet regulatory requirements.
+* **Data Loss Detection**: Automated jobs scan for `reconciliation_status = 'DISCREPANCY'` to catch silent drops where records disappear during transforms due to bugs.

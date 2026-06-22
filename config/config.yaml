@@ -1,0 +1,21 @@
+# Lakehouse Platform Configurations
+dev:
+  warehouse_dir: "c:/Users/Dell/Downloads/project1/data/warehouse"
+  metadata_path: "c:/Users/Dell/Downloads/project1/data/metadata"
+  log_file: "c:/Users/Dell/Downloads/project1/data/logs/lakehouse.log"
+  spark_packages: "io.delta:delta-spark_4.1_2.13:4.1.0"
+  derby_home: "c:/Users/Dell/Downloads/project1/data/metadata/.derby"
+
+test:
+  warehouse_dir: "c:/Users/Dell/Downloads/project1/data/warehouse_test"
+  metadata_path: "c:/Users/Dell/Downloads/project1/data/metadata_test"
+  log_file: "c:/Users/Dell/Downloads/project1/data/logs/lakehouse_test.log"
+  spark_packages: "io.delta:delta-spark_4.1_2.13:4.1.0"
+  derby_home: "c:/Users/Dell/Downloads/project1/data/metadata_test/.derby"
+
+prod:
+  warehouse_dir: "c:/Users/Dell/Downloads/project1/data/warehouse_prod"
+  metadata_path: "c:/Users/Dell/Downloads/project1/data/metadata_prod"
+  log_file: "c:/Users/Dell/Downloads/project1/data/logs/lakehouse_prod.log"
+  spark_packages: "io.delta:delta-spark_4.1_2.13:4.1.0"
+  derby_home: "c:/Users/Dell/Downloads/project1/data/metadata_prod/.derby"

@@ -1,0 +1,144 @@
+# Production Metadata Schema Design
+
+This document details the production-ready, normalized metadata schema designed for a metadata-driven Lakehouse platform. All tables are stored as **Delta Lake tables** on the filesystem.
+
+---
+
+## 1. `pipeline_config`
+
+### Purpose
+Defines high-level execution pipelines, schedules, and active statuses.
+
+### Schema (Columns)
+* **`pipeline_id`** (STRING, Primary Key): Unique pipeline identifier.
+* **`pipeline_name`** (STRING): Short name of the pipeline.
+* **`description`** (STRING): Summary of what the pipeline does.
+* **`schedule_cron`** (STRING): Cron expression representing the frequency of runs.
+* **`is_active`** (BOOLEAN): Toggle to enable/disable execution.
+* **`created_at`** (TIMESTAMP): Record creation timestamp.
+
+### Example Record
+```json
+{
+  "pipeline_id": "sales_ingest_pipeline",
+  "pipeline_name": "Sales Ingestion",
+  "description": "Extracts raw sales JSON from landing and writes to Medallion Bronze",
+  "schedule_cron": "0 * * * *",
+  "is_active": true,
+  "created_at": "2026-06-20 12:00:00"
+}
+```
+
+---
+
+## 2. `table_config`
+
+### Purpose
+Defines the source files and Medallion tables involved in a pipeline, mapping their physical storage format, paths, and write strategies.
+
+### Schema (Columns)
+* **`table_id`** (STRING, Primary Key): Unique table identifier.
+* **`pipeline_id`** (STRING, Foreign Key): Links to `pipeline_config`.
+* **`layer`** (STRING): Medallion layer (`landing`, `bronze`, `silver`, `gold`).
+* **`table_name`** (STRING): Physical name of the table in Spark Catalog.
+* **`storage_path`** (STRING): File system directory path.
+* **`file_format`** (STRING): Format (`json`, `parquet`, `csv`, `delta`).
+* **`write_mode`** (STRING): Target write mode (`append`, `overwrite`, `merge`).
+* **`partition_cols`** (ARRAY\<STRING\>): List of partitioning columns.
+* **`merge_keys`** (ARRAY\<STRING\>): List of keys used for upserts.
+
+### Example Record
+```json
+{
+  "table_id": "sales_bronze_target",
+  "pipeline_id": "sales_ingest_pipeline",
+  "layer": "bronze",
+  "table_name": "sales",
+  "storage_path": "c:/Users/Dell/Downloads/project1/data/bronze/db_bronze/sales",
+  "file_format": "delta",
+  "write_mode": "merge",
+  "partition_cols": [],
+  "merge_keys": ["sale_id"]
+}
+```
+
+---
+
+## 3. `column_config`
+
+### Purpose
+Defines schema rules, data types, and primary key status for conformed target tables. Used for schema enforcement and validation.
+
+### Schema (Columns)
+* **`column_id`** (STRING, Primary Key): Unique column-table mapping ID.
+* **`table_id`** (STRING, Foreign Key): Links to `table_config`.
+* **`column_name`** (STRING): Name of the column.
+* **`data_type`** (STRING): SQL Data type (`string`, `integer`, `double`, `timestamp`, etc.).
+* **`is_nullable`** (BOOLEAN): Flag indicating if the column can accept Null values.
+* **`is_primary_key`** (BOOLEAN): True if the column is a unique identifier key.
+* **`description`** (STRING): Documentation describing column meaning.
+
+### Example Record
+```json
+{
+  "column_id": "col_sales_bronze_sale_id",
+  "table_id": "sales_bronze_target",
+  "column_name": "sale_id",
+  "data_type": "string",
+  "is_nullable": false,
+  "is_primary_key": true,
+  "description": "Unique UUID for each sales transaction"
+}
+```
+
+---
+
+## 4. `dq_rules`
+
+### Purpose
+Holds assertions that evaluate table records at runtime to enforce quality gates (failing, warning, or quarantining bad records).
+
+### Schema (Columns)
+* **`rule_id`** (STRING, Primary Key): Unique validation rule ID.
+* **`table_id`** (STRING, Foreign Key): Links to `table_config`.
+* **`column_name`** (STRING): Column being validated.
+* **`rule_type`** (STRING): Type of validation (`MIN_VAL`, `NOT_NULL`, `REGEX`, etc.).
+* **`expression`** (STRING): Spark SQL expression to evaluate (e.g. `unit_price > 0`).
+* **`action_on_fail`** (STRING): Execution response (`FAIL_PIPELINE`, `QUARANTINE`, `WARN`).
+* **`is_active`** (BOOLEAN): Status of the check rule.
+
+### Example Record
+```json
+{
+  "rule_id": "sales_price_min_check",
+  "table_id": "sales_bronze_target",
+  "column_name": "unit_price",
+  "rule_type": "MIN_VAL",
+  "expression": "unit_price > 0",
+  "action_on_fail": "QUARANTINE",
+  "is_active": true
+}
+```
+
+---
+
+## 5. `pipeline_dependencies`
+
+### Purpose
+Stores execution relationships between pipelines. This is used to build DAG structures (e.g., preventing a Gold reporting pipeline from running until the Bronze and Silver ingestion pipelines complete).
+
+### Schema (Columns)
+* **`dependency_id`** (STRING, Primary Key): Unique dependency relationship ID.
+* **`pipeline_id`** (STRING, Foreign Key): The downstream pipeline waiting for data.
+* **`parent_pipeline_id`** (STRING, Foreign Key): The upstream pipeline that must run successfully first.
+* **`is_active`** (BOOLEAN): Toggle dependency check on/off.
+
+### Example Record
+```json
+{
+  "dependency_id": "sales_bronze_to_silver_dep",
+  "pipeline_id": "sales_silver_transformation",
+  "parent_pipeline_id": "sales_ingest_pipeline",
+  "is_active": true
+}
+```

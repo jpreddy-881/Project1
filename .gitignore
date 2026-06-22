@@ -1,0 +1,20 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# PySpark / Spark log outputs
+*.log
+derby.log
+metastore_db/
+
+# Local Lakehouse Data (Contains Delta files, logs, and metastores)
+data/
+
+# OS-generated files
+.DS_Store
+Thumbs.db
+
+# VS Code / IDE configs
+.vscode/
+.idea/
